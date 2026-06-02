@@ -1,0 +1,110 @@
+version: '3.9'
+
+services:
+  # ============================================
+  # PostgreSQL Database
+  # ============================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: event-management-db
+    environment:
+      POSTGRES_USER: eventuser
+      POSTGRES_PASSWORD: eventpassword
+      POSTGRES_DB: event_management
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventuser -d event_management"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - event-management-network
+
+  # ============================================
+  # Redis Cache (Optional)
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: event-management-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - event-management-network
+
+  # ============================================
+  # Node.js Express Backend
+  # ============================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: event-management-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://eventuser:eventpassword@postgres:5432/event_management
+      - REDIS_URL=redis://redis:6379
+      - PORT=3001
+      - FRONTEND_URL=http://localhost:3000
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY}
+      - WHATSAPP_BUSINESS_API_KEY=${WHATSAPP_BUSINESS_API_KEY}
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/node_modules:/app/node_modules
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - event-management-network
+
+  # ============================================
+  # Next.js Frontend
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: event-management-frontend
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:3001/api
+      - NEXT_PUBLIC_SOCKET_URL=http://backend:3001
+      - NODE_ENV=production
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/node_modules:/app/node_modules
+    networks:
+      - event-management-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  event-management-network:
+    driver: bridge
