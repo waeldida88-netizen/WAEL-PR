@@ -43,7 +43,9 @@ router.post('/generate', authenticate, checkPermission('canSendInvitations'), as
 
       if (!guest) continue;
 
-      // Generate QR code data
+      // Generate QR code DB record first (unique short code)
+      const code = crypto.randomBytes(16).toString('hex'); // 32 hex chars
+
       const qrData = {
         guestId,
         eventId,
@@ -52,17 +54,19 @@ router.post('/generate', authenticate, checkPermission('canSendInvitations'), as
         timestamp: Date.now()
       };
 
-      const qrCode = await QRCode.toDataURL(JSON.stringify(qrData));
+      const encryptedData = Buffer.from(JSON.stringify(qrData)).toString('base64');
 
-      // Create QR code record
       const qrCodeRecord = await prisma.qRCode.create({
         data: {
-          code: crypto.randomBytes(32).toString('hex'),
-          encryptedData: Buffer.from(JSON.stringify(qrData)).toString('base64'),
+          code,
+          encryptedData,
           guestId,
           eventId
         }
       });
+
+      // Generate a QR image that encodes only the unique code (the scanner will send the code to backend)
+      const qrCodeImage = await QRCode.toDataURL(code);
 
       // Create invitation
       const invitation = await prisma.invitation.create({
@@ -72,7 +76,7 @@ router.post('/generate', authenticate, checkPermission('canSendInvitations'), as
           createdBy: req.user!.id,
           invitationText,
           qrCodeId: qrCodeRecord.id,
-          qrCodeData: qrCode,
+          qrCodeData: qrCodeImage,
           status: 'READY_TO_SEND'
         }
       });
@@ -174,7 +178,7 @@ router.post('/send', authenticate, checkPermission('canSendInvitations'), async 
 });
 
 // ============================================
-// SCAN QR CODE
+// SCAN QR CODE (Mobile Scanner will POST the unique code)
 // ============================================
 
 router.post('/scan-qr', authenticate, checkPermission('canCheckInGuests'), async (
@@ -190,7 +194,8 @@ router.post('/scan-qr', authenticate, checkPermission('canCheckInGuests'), async
     }
 
     const qrRecord = await prisma.qRCode.findUnique({
-      where: { code: qrCode }
+      where: { code: qrCode },
+      include: { invitations: true }
     });
 
     if (!qrRecord) {
@@ -203,6 +208,19 @@ router.post('/scan-qr', authenticate, checkPermission('canCheckInGuests'), async
 
     if (!guest) {
       throw new AppError(404, 'Guest not found');
+    }
+
+    // Prevent duplicate check-ins
+    const existingCheckIn = await prisma.checkIn.findUnique({
+      where: { guestId: guest.id }
+    });
+
+    if (existingCheckIn) {
+      return res.status(200).json({
+        success: true,
+        message: 'Guest already checked in',
+        data: { guest, checkedInAt: existingCheckIn.checkedInAt }
+      });
     }
 
     // Create check-in record
@@ -230,7 +248,8 @@ router.post('/scan-qr', authenticate, checkPermission('canCheckInGuests'), async
       }
     });
 
-    req.app.locals.io.emit('guest-checked-in', {
+    // Emit real-time event to update dashboards and event rooms
+    req.app.locals.io.to(`event-${qrRecord.eventId}`).emit('guest-checked-in-live', {
       guestId: guest.id,
       guestName: guest.fullName,
       chairNumber: guest.chairNumber,
